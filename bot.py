@@ -44,6 +44,13 @@ GUILD_EXAMPLE_FILE = os.path.join(HERE, 'guild.txt.example')
 LEGACY_TOKEN_FILE = os.path.join(HERE, 'token.txt')  # pre-.env location, still read if present
 PREFIX = '!'
 UID_RE = re.compile(r'\d{6,12}')      # UIDs are digits; never trust one into a URL
+
+# The engine may be imported from a pip install (requirements-bot.txt) rather than
+# from the checkout next to this file - and then it looks for Tesseract beside
+# site-packages, where the bundled copy is not. Point it at the bundle we ship.
+_VENDOR_TESSERACT = os.path.join(ROOT, 'vendor', 'tesseract', 'tesseract.exe')
+if not os.environ.get('RELIC_TESSERACT') and os.path.isfile(_VENDOR_TESSERACT):
+    os.environ['RELIC_TESSERACT'] = _VENDOR_TESSERACT
 PAGE_SIZE = 25
 IMAGE_TIMEOUT = 180                       # seconds to wait for the screenshot
 GRADE_COLORS = {
@@ -206,10 +213,32 @@ def error_ref(exc: BaseException, **context) -> str:
     return ref
 
 
+def failure_hint(exc: BaseException) -> str:
+    """What went wrong, in words, without exposing this machine.
+
+    A bare error code was useless to whoever was holding the bot: they cannot act
+    on "05405fbf". These categories say enough to self-diagnose - "the host has no
+    OCR engine" is actionable, "C:\\Users\\...\\tesseract.exe is missing" is not.
+    """
+    text = f'{type(exc).__name__}: {exc}'.lower()
+    if 'tesseract' in text:
+        return "the bot's machine has no OCR engine set up"
+    if isinstance(exc, FileNotFoundError) or 'no such file' in text:
+        return "a file the bot needs is missing on its machine"
+    if isinstance(exc, PermissionError) or 'access is denied' in text:
+        return "the bot's machine blocked access to a file"
+    if 'unidentifiedimage' in text or 'cannot identify image' in text:
+        return 'that file could not be read as an image'
+    if any(w in text for w in ('urlopen', 'connection', 'timed out', 'getaddrinfo')):
+        return 'a network request failed'
+    return 'the bot hit an internal error'
+
+
 def with_code(message: str, exc: BaseException, **context) -> str:
     """A user-facing failure: plain wording, no host detail, plus a log code."""
-    return scrub(f'{message}\nError code `{error_ref(exc, **context)}` — ask the bot owner '
-                 f'to check the console if this keeps happening.')
+    ref = error_ref(exc, **context)
+    return scrub(f'{message}\nReason: {failure_hint(exc)}. '
+                 f'Error code `{ref}` (the details are in the log, not here).')
 
 
 def is_image_attachment(att: discord.Attachment) -> bool:
