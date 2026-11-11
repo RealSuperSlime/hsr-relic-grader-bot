@@ -17,7 +17,9 @@ from __future__ import annotations
 import asyncio
 import io
 import os
+import re
 import sys
+import uuid
 
 import discord
 from discord import app_commands
@@ -38,6 +40,7 @@ GUILD_FILE = os.path.join(HERE, 'guild.txt')       # optional: paste a server ID
 GUILD_EXAMPLE_FILE = os.path.join(HERE, 'guild.txt.example')
 LEGACY_TOKEN_FILE = os.path.join(HERE, 'token.txt')  # pre-.env location, still read if present
 PREFIX = '!'
+UID_RE = re.compile(r'\d{6,12}')      # UIDs are digits; never trust one into a URL
 PAGE_SIZE = 25
 IMAGE_TIMEOUT = 180                       # seconds to wait for the screenshot
 GRADE_COLORS = {
@@ -52,7 +55,9 @@ intents.guilds = True
 intents.guild_messages = True
 intents.dm_messages = True
 intents.message_content = True            # required for !prefix commands
-bot = commands.Bot(command_prefix=PREFIX, intents=intents, help_command=None)
+bot = commands.Bot(command_prefix=PREFIX, intents=intents, help_command=None,
+                   # never let user text turn into @everyone/@role pings
+                   allowed_mentions=discord.AllowedMentions.none())
 
 
 # --------------------------------------------------------------------------- #
@@ -134,7 +139,53 @@ def grade_color(letter: str) -> int:
     return GRADE_COLORS.get(key, GRADE_COLORS.get(key[:1], 0x6B7479))
 
 
+MAX_IMAGE_BYTES = 8 * 1024 * 1024      # a relic screenshot is a few hundred KB
+
+# --------------------------------------------------------------------------- #
+# keeping this machine out of Discord
+#
+# A raw exception is enough to hand a stranger the OS, the username and the
+# folder layout of whatever box the bot runs on, so nothing user-visible is
+# ever built from exception text. The detail goes to the console instead.
+# --------------------------------------------------------------------------- #
+_DRIVE_RE = re.compile(r'[A-Za-z]:[\\/][^\s`"\')]*')
+_UNC_RE = re.compile(r'\\\\[^\s`"\')]+')
+_MACHINE_WORDS = re.compile(r'(?<![\w/])(?:site-packages|AppData|Program Files|Users)(?![\w-])',
+                            re.IGNORECASE)
+_HOME = os.path.expanduser('~')
+_USERNAME = os.environ.get('USERNAME') or os.environ.get('USER') or ''
+
+
+def scrub(text: str) -> str:
+    """Remove anything that describes this machine from user-visible text."""
+    if not text:
+        return text
+    text = _DRIVE_RE.sub('<path>', text)
+    text = _UNC_RE.sub('<path>', text)
+    if _HOME:
+        text = text.replace(_HOME, '<home>')
+    if len(_USERNAME) > 2:
+        text = re.sub(re.escape(_USERNAME), '<user>', text, flags=re.IGNORECASE)
+    return _MACHINE_WORDS.sub('<path>', text)
+
+
+def error_ref(exc: BaseException) -> str:
+    """Log the real error for whoever runs the bot; give the user a code."""
+    ref = uuid.uuid4().hex[:8]
+    print(f'[error {ref}] {type(exc).__name__}: {exc}',
+          file=sys.stderr, flush=True)
+    return ref
+
+
+def with_code(message: str, exc: BaseException) -> str:
+    """A user-facing failure: plain wording, no host detail, plus a log code."""
+    return scrub(f'{message}\nError code `{error_ref(exc)}` — ask the bot owner '
+                 f'to check the console if this keeps happening.')
+
+
 def is_image_attachment(att: discord.Attachment) -> bool:
+    if att.size and att.size > MAX_IMAGE_BYTES:
+        return False
     if (att.content_type or '').lower().startswith('image/'):
         return True
     return att.filename.lower().endswith(('.png', '.jpg', '.jpeg', '.webp', '.bmp'))
@@ -178,7 +229,8 @@ def build_embed(payload: dict) -> discord.Embed:
     warnings = relic.get('warnings') or []
     if warnings:
         embed.add_field(name='⚠ OCR warnings',
-                        value='\n'.join(f'• {w}' for w in warnings)[:1000], inline=False)
+                        value=scrub('\n'.join(f'• {w}' for w in warnings))[:1000],
+                        inline=False)
     embed.set_footer(text='Fribbels-identical scoring · OCR and grading ran locally')
     return embed
 
@@ -293,8 +345,9 @@ async def grade_and_reply(send, character_name: str, attachment: discord.Attachm
         loop = asyncio.get_running_loop()
         payload = await loop.run_in_executor(None, grade_image, io.BytesIO(data), character_name)
     except Exception as e:
-        await notice.edit(content=f'Could not read that screenshot — `{type(e).__name__}: {e}`\n'
-                                  f'Try a tighter crop of just the relic card.')
+        await notice.edit(content=with_code(
+            'Could not read that screenshot — try a tighter crop of just the relic card.',
+            e))
         return
     await notice.edit(content=None, embed=build_embed(payload))
 
@@ -353,19 +406,24 @@ async def grade_cmd(ctx, *, character: str = ''):
 
 
 async def run_uid_lookup(send, uid: str, character: str = ''):
+    uid = (uid or '').strip()
     if not uid:
         await send(f'Usage: `{PREFIX}uid <uid>` — e.g. `{PREFIX}uid 101000000`\n'
                    f'Add a name to filter: `{PREFIX}uid 101000000 herta`')
+        return
+    if not UID_RE.fullmatch(uid):
+        await send('That does not look like a UID — they are digits only, '
+                   'e.g. `101000000`.')
         return
     notice = await send(f'Fetching showcase **{uid}**…')
     try:
         loop = asyncio.get_running_loop()
         data = await loop.run_in_executor(None, showcase, uid, character or None)
     except ShowcaseError as e:
-        await notice.edit(content=f'⚠ {e}')
+        await notice.edit(content=scrub(f'⚠ {e}'))
         return
     except Exception as e:
-        await notice.edit(content=f'⚠ Could not read that profile: `{type(e).__name__}: {e}`')
+        await notice.edit(content=with_code('Could not read that profile.', e))
         return
 
     characters = data['characters']
@@ -486,7 +544,7 @@ async def sync_cmd(ctx):
                        f'{", ".join(sorted(c.name for c in synced))}\n'
                        f'If they still do not show, press Ctrl+R in Discord.')
     except Exception as e:
-        await ctx.send(f'Sync failed: `{type(e).__name__}: {e}`')
+        await ctx.send(with_code('Sync failed.', e))
 
 
 @sync_cmd.error
@@ -499,7 +557,25 @@ async def sync_cmd_error(ctx, error):
 async def on_command_error(ctx, error):
     if isinstance(error, commands.CommandNotFound):
         return
-    await ctx.send(f'`{type(error).__name__}: {error}`')
+    if isinstance(error, (commands.NotOwner, commands.MissingPermissions)):
+        await ctx.send('Only the bot owner can run that.')
+        return
+    await ctx.send(with_code('Something went wrong running that command.', error))
+
+
+@bot.tree.error
+async def on_app_command_error(interaction: discord.Interaction,
+                               error: app_commands.AppCommandError):
+    """Slash commands had no handler at all: an exception there reached the user
+    as Discord's own traceback text. Keep the detail local, answer in private."""
+    message = with_code('Something went wrong running that command.', error)
+    try:
+        if interaction.response.is_done():
+            await interaction.followup.send(message, ephemeral=True)
+        else:
+            await interaction.response.send_message(message, ephemeral=True)
+    except discord.HTTPException:
+        pass
 
 
 def main() -> None:
