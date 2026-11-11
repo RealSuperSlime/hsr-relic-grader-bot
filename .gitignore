@@ -1,0 +1,12 @@
+# Your credentials - never commit these
+.env
+.env.*
+!.env.example
+token.txt
+guild.txt
+
+# Local environment and caches
+.venv/
+venv/
+__pycache__/
+*.py[cod]

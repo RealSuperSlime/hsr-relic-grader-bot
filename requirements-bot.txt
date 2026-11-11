@@ -1,0 +1,3 @@
+# The scoring engine + OCR live in the hsr-relic-grader repo.
+discord.py>=2.4
+hsr-relic-grader @ git+https://github.com/RealSuperSlime/hsr-relic-grader.git

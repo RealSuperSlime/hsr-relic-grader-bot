@@ -1,0 +1,10 @@
+# Optional. Paste YOUR SERVER ID here (right-click the server in Discord with
+# Developer Mode on -> Copy Server ID) and slash commands will update instantly
+# instead of waiting on Discord's global propagation, which can take an hour.
+#
+# Leave it blank to register commands globally for every server the bot is in.
+#
+# Copy this file to "guild.txt" to use it. guild.txt is git-ignored, so your
+# server ID never gets uploaded; this example file stays safe to share.
+#
+# You can also set DISCORD_GUILD_ID in .env instead of using this file.
