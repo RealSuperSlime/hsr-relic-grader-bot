@@ -10,3 +10,6 @@ guild.txt
 venv/
 __pycache__/
 *.py[cod]
+
+# Error log: contains host paths, never publish it
+logs/

@@ -19,6 +19,8 @@ import io
 import os
 import re
 import sys
+import time
+import traceback
 import uuid
 
 import discord
@@ -32,6 +34,7 @@ sys.path.insert(0, ROOT)
 from relic_grades.characters import all_character_names, find_character  # noqa: E402
 from relic_grades.envfile import load_env  # noqa: E402
 from relic_grades.grade import grade_image  # noqa: E402
+from relic_grades.paths import data_dir  # noqa: E402
 from relic_grades.showcase import ShowcaseError, showcase  # noqa: E402
 
 ENV_FILE = os.path.join(HERE, '.env')              # your secrets live here (git-ignored)
@@ -141,6 +144,15 @@ def grade_color(letter: str) -> int:
 
 MAX_IMAGE_BYTES = 8 * 1024 * 1024      # a relic screenshot is a few hundred KB
 
+
+def find_tesseract_quiet() -> str:
+    """For logging only: which tesseract the OCR would use, or why it can't."""
+    from relic_grades.ocr import find_tesseract
+    try:
+        return find_tesseract()
+    except Exception as e:
+        return f'NOT FOUND ({type(e).__name__})'
+
 # --------------------------------------------------------------------------- #
 # keeping this machine out of Discord
 #
@@ -169,17 +181,34 @@ def scrub(text: str) -> str:
     return _MACHINE_WORDS.sub('<path>', text)
 
 
-def error_ref(exc: BaseException) -> str:
-    """Log the real error for whoever runs the bot; give the user a code."""
+LOG_DIR = os.path.join(HERE, 'logs')
+LOG_FILE = os.path.join(LOG_DIR, 'errors.log')
+
+
+def error_ref(exc: BaseException, **context) -> str:
+    """Log the real error for whoever runs the bot; give the user a code.
+
+    Written to stderr *and* to logs/errors.log with a full traceback, so a
+    failure can be diagnosed after the console window is long gone. The file is
+    git-ignored: it contains host paths.
+    """
     ref = uuid.uuid4().hex[:8]
-    print(f'[error {ref}] {type(exc).__name__}: {exc}',
-          file=sys.stderr, flush=True)
+    extra = ' '.join(f'{k}={v}' for k, v in context.items())
+    detail = f'[error {ref}] {type(exc).__name__}: {exc}' + (f'  ({extra})' if extra else '')
+    print(detail, file=sys.stderr, flush=True)
+    try:
+        os.makedirs(LOG_DIR, exist_ok=True)
+        with open(LOG_FILE, 'a', encoding='utf-8') as f:
+            f.write(f'\n=== {time.strftime("%Y-%m-%d %H:%M:%S")} {detail}\n')
+            traceback.print_exception(type(exc), exc, exc.__traceback__, file=f)
+    except Exception:
+        pass
     return ref
 
 
-def with_code(message: str, exc: BaseException) -> str:
+def with_code(message: str, exc: BaseException, **context) -> str:
     """A user-facing failure: plain wording, no host detail, plus a log code."""
-    return scrub(f'{message}\nError code `{error_ref(exc)}` — ask the bot owner '
+    return scrub(f'{message}\nError code `{error_ref(exc, **context)}` — ask the bot owner '
                  f'to check the console if this keeps happening.')
 
 
@@ -347,7 +376,8 @@ async def grade_and_reply(send, character_name: str, attachment: discord.Attachm
     except Exception as e:
         await notice.edit(content=with_code(
             'Could not read that screenshot — try a tighter crop of just the relic card.',
-            e))
+            e, bytes=len(data), content_type=attachment.content_type or '?',
+            data_dir=data_dir(), tesseract=find_tesseract_quiet()))
         return
     await notice.edit(content=None, embed=build_embed(payload))
 
